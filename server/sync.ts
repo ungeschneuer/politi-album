@@ -30,6 +30,12 @@ const AW_API  = 'https://www.abgeordnetenwatch.de/api/v2';
 const WD_API  = 'https://www.wikidata.org/w/api.php';
 const WC_PATH = 'https://commons.wikimedia.org/wiki/Special:FilePath';
 
+/**
+ * Descriptive User-Agent with a contact URL. Abgeordnetenwatch and Wikimedia
+ * reject generic or anonymous client identifiers with HTTP 403.
+ */
+const USER_AGENT = 'Politi-Sammelalbum-Sync/1.0 (+https://github.com/ungeschneuer/politi-album)';
+
 // Allow running as a standalone script: `npm run server:sync`
 if (process.argv.includes('--run-sync')) {
   syncPoliticians()
@@ -190,7 +196,7 @@ async function fetchJSON<T>(url: string, retries = 3): Promise<T> {
     let res: Response;
     try {
       res = await fetch(url, {
-        headers: { 'User-Agent': 'Polidex/1.0' },
+        headers: { 'User-Agent': USER_AGENT, 'Accept': 'application/json' },
         signal: AbortSignal.timeout(15_000),
       });
     } catch {

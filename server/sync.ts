@@ -30,17 +30,32 @@ const AW_API  = 'https://www.abgeordnetenwatch.de/api/v2';
 const WD_API  = 'https://www.wikidata.org/w/api.php';
 const WC_PATH = 'https://commons.wikimedia.org/wiki/Special:FilePath';
 
-/**
- * Descriptive User-Agent with a contact URL. Abgeordnetenwatch and Wikimedia
- * reject generic or anonymous client identifiers with HTTP 403.
- */
+/** Descriptive User-Agent with a contact URL for the APIs queried below. */
 const USER_AGENT = 'Politi-Sammelalbum-Sync/1.0 (+https://github.com/ungeschneuer/politi-album)';
+
+/**
+ * Exit code (EX_TEMPFAIL) used when an API keeps answering HTTP 403.
+ * Abgeordnetenwatch intermittently blocks some GitHub Actions runner IPs;
+ * the workflow treats this code as "skip this run" and keeps the last
+ * published data instead of failing.
+ */
+export const EXIT_API_BLOCKED = 75;
+
+/** Thrown when a request is still answered with HTTP 403 after all retries. */
+export class ApiBlockedError extends Error {}
 
 // Allow running as a standalone script: `npm run server:sync`
 if (process.argv.includes('--run-sync')) {
   syncPoliticians()
     .then(n => { console.log(`Done — ${n} politicians written to ${DATA_FILE}`); process.exit(0); })
-    .catch(err => { console.error('Sync failed:', err); process.exit(1); });
+    .catch(err => {
+      if (err instanceof ApiBlockedError) {
+        console.log(`::warning::Sync skipped, API access blocked: ${err.message}`);
+        process.exit(EXIT_API_BLOCKED);
+      }
+      console.error('Sync failed:', err);
+      process.exit(1);
+    });
 }
 
 // ─── Main entry point ─────────────────────────────────────────────────────────
@@ -185,10 +200,13 @@ export async function syncPoliticians(outputPath: string = DATA_FILE): Promise<n
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 async function fetchJSON<T>(url: string, retries = 3): Promise<T> {
+  let lastStatus = 0;
   for (let attempt = 0; attempt <= retries; attempt++) {
     if (attempt > 0) {
-      // Exponential backoff: 1s, 2s, 4s, capped at 16s
-      const delay = Math.min(1_000 * 2 ** (attempt - 1), 16_000);
+      // Exponential backoff: 1s, 2s, 4s (capped at 16s); after HTTP 403 the
+      // base is 15s (15s, 30s, 60s) because blocks are lifted more slowly.
+      const base  = lastStatus === 403 ? 15_000 : 1_000;
+      const delay = Math.min(base * 2 ** (attempt - 1), lastStatus === 403 ? 60_000 : 16_000);
       console.warn(`[sync] Backing off ${delay}ms before retry ${attempt}/${retries}...`);
       await sleep(delay);
     }
@@ -205,9 +223,12 @@ async function fetchJSON<T>(url: string, retries = 3): Promise<T> {
       throw new Error(`[sync] Network error after ${retries} retries: ${url}`);
     }
 
-    // Retry on rate-limit or transient server errors
-    if ((res.status === 429 || res.status >= 500) && attempt < retries) continue;
+    lastStatus = res.status;
 
+    // Retry on blocks, rate-limit or transient server errors
+    if ((res.status === 403 || res.status === 429 || res.status >= 500) && attempt < retries) continue;
+
+    if (res.status === 403) throw new ApiBlockedError(`HTTP 403: ${url}`);
     if (!res.ok) throw new Error(`HTTP ${res.status}: ${url}`);
     return res.json() as Promise<T>;
   }
